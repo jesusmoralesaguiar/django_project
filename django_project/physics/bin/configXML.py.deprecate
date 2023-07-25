@@ -1,0 +1,214 @@
+#!/usr/bin/python
+
+#==================================================================
+# Librerias
+#==================================================================
+
+from lxml import etree
+import requests
+import os
+import sys
+from io import BytesIO
+
+from django.core.exceptions import ObjectDoesNotExist
+from physics.models import JenkinsCredentials
+from physicsexceptions import ConfigXMLException, ActualiceJenkinsException
+
+
+class ActualiceJenkins:
+
+    def jenkins_jobs(self, obj, delete=False, product=False, environment=False, discipline=False, project=False):
+
+        try:
+            for jenkins_name in JenkinsCredentials.objects.all():
+                jenkins = ConfigXML(
+                    jenkins_name.url,
+                    jenkins_name.user,
+                    jenkins_name.password,
+                    jenkins_name.host)
+                jenkins._getCrumbJenkins()
+            for jenkins_name in JenkinsCredentials.objects.all():
+                jenkins = ConfigXML(
+                    jenkins_name.url,
+                    jenkins_name.user,
+                    jenkins_name.password,
+                    jenkins_name.host)
+                doc = None
+                root = None
+                if delete:
+
+                    choices, doc, root = jenkins.configChoices(doc, root, product, environment, discipline, project)
+                    jenkins.deleteXML(obj.name, doc, root, choices)
+                else:
+
+                    choices, doc, root = jenkins.configChoices(doc, root, product, environment, discipline, project)
+                    jenkins.modifyConfigXML(obj.name, doc, root, choices)
+
+        except ObjectDoesNotExist:
+            raise ActualiceJenkinsException
+
+        except TypeError:
+            raise ActualiceJenkinsException
+
+
+class ConfigXML:
+
+    def __init__(self, url, user, password, host):
+
+        if url.find("/config.xml") == -1:
+            self.url = url+"/config.xml"
+        else:
+            self.url = url
+        if self.url.find("//config.xml") == -1:
+            self.url.remplace("//config.xml", "/config.xml")
+        print(self.url)
+        self.user = user
+        self.password = password
+        self.host = host
+
+    def setConfig(self, url, user, password, host):
+        if url.find("/config.xml") == -1:
+            self.url = url+"/config.xml"
+        else:
+            self.url = url
+            if self.url.find("//config.xml") == -1:
+                self.url.remplace("//config.xml", "/config.xml")
+
+        self.user = user
+        self.password = password
+        self.host = host
+
+    def _getCrumbJenkins(self):
+        try:
+            crumbResultJson = requests.get('https://'+self.user+':'+self.password+'@'+self.host+'/crumbIssuer/api/json', verify=False)
+            crumb = crumbResultJson.text.split(",")[1].split(":")[1].replace("\"", "")
+            return crumb
+        except IndexError:
+            raise ConfigXMLException
+
+    def _downloadConfig(self):
+        try:
+            """
+             Funcion para la descarga del fichero config.xml del Job de Jenkins
+            """
+            crumb = self._getCrumbJenkins()
+            """
+             Cabecera de la peticion con el crumb de Jenkins
+            """
+            headers = {
+                'Jenkins-Crumb': crumb,
+
+            }
+            """
+             Ejecucion de la peticion GET a la API
+            """
+            rfile = requests.get(self.url,
+                                 headers=headers, auth=(self.user, self.password), verify=False)
+
+            data = rfile.text
+            # print rfile.text
+            doc = etree.parse(BytesIO(data.decode('utf-8').encode('ascii')))
+            return doc
+        except etree.XMLSyntaxError:
+            raise ConfigXMLException
+
+    def _uploadConfig(self, data):
+        """
+        Funcion para la subida a Jenkins del fichero config.xml del Job actualizado
+        """
+        crumb = self._getCrumbJenkins()
+        headers = {
+
+            # 'Jenkins-Crumb': '443f45ff603b4bb203be2a7cd7dc6bc2',
+            'Jenkins-Crumb': crumb,
+        }
+        """
+         Ejecucion de la peticion POST a la API
+        """
+        result = requests.post(self.url,
+                               headers=headers, data=data,
+                               auth=(self.user, self.password), verify = False)
+        # print result.content
+
+    def modifyConfigXML(self, obj, doc, root, choices):
+        """
+        funcion para modificar en el config.xml los combos de type_machine, environment and project.
+        """
+    # Add all existing choices
+        etree.SubElement(choices, "string").text = obj
+
+        self._uploadConfig(etree.tostring(doc))
+        return etree.tostring(doc)
+
+    def deleteXML(self, obj, doc, root, choices):
+
+        for choice in choices:
+            if obj == choice.text:
+                choice.getparent().remove(choice)
+        # Add all existing choices
+        self._uploadConfig(etree.tostring(doc))
+        return etree.tostring(doc)
+
+    def deleteAll(self):
+        doc = self._downloadConfig()
+        root = doc.getroot()
+
+        choices, aux, aux2 = self.configChoices(doc, root, product=False, environment=False, discipline=True, project=False)
+        for elem in choices:
+            elem.getparent().remove(elem)  # Delete all choices
+
+        choices, aux, aux2 =self.configChoices(doc, root, product=False, environment=True, discipline=False, project=False)
+        for elem in choices:
+            elem.getparent().remove(elem)
+
+        choices, aux, aux2 =self.configChoices(doc, root, product=True, environment=False, discipline=False, project=False)
+        for elem in choices:
+            elem.getparent().remove(elem)
+
+        choices, aux, aux2 =self.configChoices(doc, root, product=False, environment=False, discipline=False, project=True)
+        for elem in choices:
+            elem.getparent().remove(elem)
+        self._uploadConfig(etree.tostring(doc))
+
+        return etree.tostring(doc)
+
+
+    def configChoices(self, doc=None, root=None, type_machine=False, environment=False, discipline=False, project=False):
+
+        try:
+
+            if doc is None or root is None:
+                doc = self._downloadConfig()
+                root = doc.getroot()
+
+            for frist in root.findall('properties'):
+
+                for second in frist:
+                    if second.tag.find("ParametersDefinitionProperty") != -1:
+                        for third in second.findall('parameterDefinitions'):
+                            for c in second:
+
+                                for choices in c:
+
+                                    for choice in choices:
+                                        if choice.tag.find('name') != -1:
+                                            actual = choice.text
+                                        if choice.tag.find('choice') != -1:
+                                            if type_machine and actual == "type_machine":
+                                                # "RETURN machine"
+                                                return choice[0], doc, root
+                                            elif environment and actual == "environment":
+                                                # "RETURN env"
+                                                return choice[0], doc, root
+                                            elif discipline and actual == "discipline":
+                                                # "RETURN disc"
+                                                return choice[0], doc, root
+                                            elif project and actual == "project":
+                                                # "RETURN disc"
+                                                return choice[0], doc, root
+
+        except IndexError:
+            raise ConfigXMLException
+
+        except AttributeError:
+            raise ConfigXMLException
